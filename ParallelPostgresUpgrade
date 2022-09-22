@@ -1,0 +1,113 @@
+------------------------
+------------------------
+------------------------
+--Parallel Postgres Upgrade (13 to 14) on Debian using pshh
+--We may have been used Chef, Puppet, Ansible, or Custom python script etc. and configure a yaml for the processes. Wehereas I'd like to use pssh (parallel ssh for the specified host range)
+--I assume that every single node has pssh installed before & has passwordless SSH for both root and postgres users beforehand.
+
+--root access Create the list "pssh_hosts_files_root"
+cat ~/.pssh_hosts_files_root
+root@192.168.100
+root@192.168.101
+....
+....
+root@192.168.120
+
+--postgres access Create the list "pssh_hosts_files_postgres"
+cat ~/.pssh_hosts_files_postgres
+postgres@192.168.100
+postgres@192.168.101
+....
+....
+postgres@192.168.120
+
+
+--Check if its working
+ pssh -i -h ~/.pssh_hosts_files_root date
+ pssh -i -h ~/.pssh_hosts_files_postgres date
+
+
+--Install postgres 14 software on all hosts
+ pssh -h ~/.pssh_hosts_files_root  -- sudo apt-get -y update
+ pssh -h ~/.pssh_hosts_files_root  -- sudo apt-get -y install postgresql-14 postgresql-server-dev-14
+
+
+--Check Diffs between config files
+ pssh -h ~/.pssh_hosts_files_root  -- diff /etc/postgresql/13/main/postgresql.conf /etc/postgresql/14/main/postgresql.conf > /tmp/postgresql.confdiffs
+ pssh -h ~/.pssh_hosts_files_root  -- diff /etc/postgresql/13/main/pg_hba.conf /etc/postgresql/14/main/pg_hba.conf > /tmp/postgresql.confdiffs
+
+
+--Stop Postgres Service
+ pssh -h ~/.pssh_hosts_files_root  --sudo systemctl stop postgresql.service
+
+
+
+--PreCheck for the upgrade process
+ pssh -i -h ~/.pssh_hosts_files_postgres -- /usr/lib/postgresql/14/bin/pg_upgrade \
+  --old-datadir=/var/lib/postgresql/13/main \
+  --new-datadir=/var/lib/postgresql/14/main \
+  --old-bindir=/usr/lib/postgresql/13/bin \
+  --new-bindir=/usr/lib/postgresql/14/bin \
+  --old-options '-c config_file=/etc/postgresql/13/main/postgresql.conf' \
+  --new-options '-c config_file=/etc/postgresql/14/main/postgresql.conf' \
+  --check
+
+
+--Upgrade !
+  pssh -i -h ~/.pssh_hosts_files_postgres -- /usr/lib/postgresql/14/bin/pg_upgrade \
+  --old-datadir=/var/lib/postgresql/13/main \
+  --new-datadir=/var/lib/postgresql/14/main \
+  --old-bindir=/usr/lib/postgresql/13/bin \
+  --new-bindir=/usr/lib/postgresql/14/bin \
+  --old-options '-c config_file=/etc/postgresql/13/main/postgresql.conf' \
+  --new-options '-c config_file=/etc/postgresql/14/main/postgresql.conf'
+
+
+  --Swap the ports for the old and new PostgreSQL versions.
+  --We can chage the port with sed utility of linux
+  --I Assume we take one of the config files
+  sed -i 's/port="5432"/port="5433"/' /tmp/postgresql13.conf
+  sed -i 's/port="5433"/port="5432"/' /tmp/postgresql14.conf
+
+--Also we can use prsync or pscp / populate to servers
+ pscp -h ~/.pssh_hosts_files /tmp/postgresql13.conf /etc/postgresql/13/main/postgresql.conf
+ pscp -h ~/.pssh_hosts_files /tmp/postgresql14.conf /etc/postgresql/14/main/postgresql.conf
+
+--Start the postgres service on all hosts
+ pssh -h ~/.pssh_hosts_files_root  -- sudo systemctl start postgresql.service
+
+--→	Confirm the upgrade is successful and server is up and running 
+  pssh -i -h ~/.pssh_hosts_files_postgres -- psql -c "SELECT version();" 
+  pssh -i -h ~/.pssh_hosts_files_postgres -- psql -c "SELECT 1;" 
+  pssh -i -h ~/.pssh_hosts_files_postgres -- psql -c "select pg_is_in_recovery();" 
+
+--Remove the old Postgres software
+ pssh -h ~/.pssh_hosts_files_root  -- apt list --installed | grep postgresql
+ pssh -h ~/.pssh_hosts_files_root  -- sudo apt-get remove postgresql-13 postgresql-server-dev-13
+ pssh -h ~/.pssh_hosts_files_root  -- sudo rm -rf /etc/postgresql/13/
+
+
+-----------------------------------------------
+-----------------------------------------------
+--Long Running Query > 1m
+SELECT
+  pid,
+  datname,
+  usename,
+  application_name,
+  client_hostname,
+  now() - pg_stat_activity.query_start AS duration,
+  query,
+  state
+FROM pg_stat_activity
+WHERE (now() - pg_stat_activity.query_start) > interval '1 minutes' and state='active' and usename  in ('web');
+
+
+--To kill
+--Also we can automate the killing process if it's needed.
+SELECT pg_cancel_backend(PID);
+SELECT pg_terminate_backend(PID); --In case of process stuck (like kill -9 so be careful!)
+
+------------------------
+------------------------
+------------------------
